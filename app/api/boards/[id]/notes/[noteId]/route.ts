@@ -7,6 +7,12 @@ import {
   hasValidContent,
   shouldSendNotification,
 } from "@/lib/slack";
+import {
+  updateDiscordMessage,
+  sendTodoNotification as sendDiscordTodoNotification,
+  hasValidContent as hasValidDiscordContent,
+  shouldSendNotification as shouldSendDiscordNotification,
+} from "@/lib/discord";
 
 // Update a note
 export async function PUT(
@@ -31,6 +37,7 @@ export async function PUT(
             id: true,
             name: true,
             slackWebhookUrl: true,
+            discordWebhookUrl: true,
           },
         },
       },
@@ -200,6 +207,22 @@ export async function PUT(
       );
     }
 
+    if (archivedAt !== undefined && user.organization?.discordWebhookUrl && note.discordMessageId) {
+      const userName = note.user?.name || note.user?.email || "Unknown User";
+      const boardName = note.board.name;
+      const isArchived = archivedAt !== null;
+      // Get content from first checklist item for Discord message
+      const noteContent =
+        note.checklistItems && note.checklistItems.length > 0 ? note.checklistItems[0].content : "";
+      await updateDiscordMessage(
+        user.organization.discordWebhookUrl,
+        noteContent,
+        isArchived,
+        boardName,
+        userName
+      );
+    }
+
     if (user.organization?.slackWebhookUrl && checklistChanges) {
       const boardName = updatedNote.board.name;
       const userName = user.name || user.email || "Unknown User";
@@ -237,6 +260,52 @@ export async function PUT(
         ) {
           await sendTodoNotification(
             user.organization.slackWebhookUrl,
+            u.content,
+            boardName,
+            userName,
+            "completed"
+          );
+        }
+      }
+    }
+
+    if (user.organization?.discordWebhookUrl && checklistChanges) {
+      const boardName = updatedNote.board.name;
+      const userName = user.name || user.email || "Unknown User";
+
+      for (const item of checklistChanges.created) {
+        if (
+          hasValidDiscordContent(item.content) &&
+          shouldSendDiscordNotification(
+            session.user.id,
+            boardId,
+            boardName,
+            updatedNote.board.sendDiscordUpdates
+          )
+        ) {
+          await sendDiscordTodoNotification(
+            user.organization.discordWebhookUrl,
+            item.content,
+            boardName,
+            userName,
+            "added"
+          );
+        }
+      }
+
+      for (const u of checklistChanges.updated) {
+        if (
+          !u.previous.checked &&
+          u.checked &&
+          shouldSendDiscordNotification(
+            session.user.id,
+            boardId,
+            boardName,
+            updatedNote.board.sendDiscordUpdates
+          )
+        ) {
+          await sendDiscordTodoNotification(
+            user.organization.discordWebhookUrl,
             u.content,
             boardName,
             userName,

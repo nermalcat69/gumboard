@@ -7,13 +7,24 @@ import {
   hasValidContent,
   shouldSendNotification,
 } from "@/lib/slack";
+import {
+  sendDiscordMessage,
+  formatNoteForDiscord,
+  hasValidContent as hasValidDiscordContent,
+  shouldSendNotification as shouldSendDiscordNotification,
+} from "@/lib/discord";
 import { NOTE_COLORS } from "@/lib/constants";
 
-// Get all notes for a board
+// Get all notes for a board with pagination
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const session = await auth();
     const boardId = (await params).id;
+    const { searchParams } = new URL(request.url);
+    
+    // Pagination parameters
+    const limit = Math.min(parseInt(searchParams.get('limit') || '20'), 50); // Max 50 notes per request
+    const offset = parseInt(searchParams.get('offset') || '0');
 
     const board = await db.board.findUnique({
       where: { id: boardId },
@@ -21,30 +32,6 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         id: true,
         isPublic: true,
         organizationId: true,
-        notes: {
-          where: {
-            deletedAt: null, // Only include non-deleted notes
-            archivedAt: null,
-          },
-          select: {
-            id: true,
-            color: true,
-            boardId: true,
-            createdBy: true,
-            createdAt: true,
-            updatedAt: true,
-            archivedAt: true,
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-              },
-            },
-            checklistItems: { orderBy: { order: "asc" } },
-          },
-          orderBy: { createdAt: "desc" },
-        },
       },
     });
 
@@ -52,30 +39,79 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       return NextResponse.json({ error: "Board not found" }, { status: 404 });
     }
 
-    if (board.isPublic) {
-      return NextResponse.json({ notes: board.notes });
+    // Check access permissions
+    if (!board.isPublic) {
+      if (!session?.user?.id) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const user = await db.user.findUnique({
+        where: { id: session.user.id },
+        select: {
+          organizationId: true,
+        },
+      });
+
+      if (!user?.organizationId) {
+        return NextResponse.json({ error: "No organization found" }, { status: 403 });
+      }
+
+      if (board.organizationId !== user.organizationId) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
     }
 
-    if (!session?.user?.id) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    // Get paginated notes
+    const [notes, totalCount] = await Promise.all([
+      db.note.findMany({
+        where: {
+          boardId: boardId,
+          deletedAt: null,
+          archivedAt: null,
+        },
+        select: {
+          id: true,
+          color: true,
+          boardId: true,
+          createdBy: true,
+          createdAt: true,
+          updatedAt: true,
+          archivedAt: true,
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+          checklistItems: { orderBy: { order: "asc" } },
+        },
+        orderBy: { createdAt: "desc" },
+        take: limit,
+        skip: offset,
+      }),
+      db.note.count({
+        where: {
+          boardId: boardId,
+          deletedAt: null,
+          archivedAt: null,
+        },
+      }),
+    ]);
 
-    const user = await db.user.findUnique({
-      where: { id: session.user.id },
-      select: {
-        organizationId: true,
-      },
+    const hasMore = offset + limit < totalCount;
+    const nextOffset = hasMore ? offset + limit : null;
+
+    return NextResponse.json({ 
+      notes,
+      pagination: {
+        total: totalCount,
+        limit,
+        offset,
+        hasMore,
+        nextOffset,
+      }
     });
-
-    if (!user?.organizationId) {
-      return NextResponse.json({ error: "No organization found" }, { status: 403 });
-    }
-
-    if (board.organizationId !== user.organizationId) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
-    }
-
-    return NextResponse.json({ notes: board.notes });
   } catch (error) {
     console.error("Error fetching notes:", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
@@ -101,6 +137,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         organization: {
           select: {
             slackWebhookUrl: true,
+            discordWebhookUrl: true,
           },
         },
         name: true,
@@ -119,6 +156,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         name: true,
         organizationId: true,
         sendSlackUpdates: true,
+        sendDiscordUpdates: true,
       },
     });
 
@@ -172,13 +210,14 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       },
     });
 
-    // Send Slack notification if note has checklist items with content
+    // Send notifications if note has checklist items with content
     const noteWithItems = note as typeof note & { checklistItems?: Array<{ content: string }> };
     const hasContent =
       noteWithItems.checklistItems &&
       noteWithItems.checklistItems.length > 0 &&
-      noteWithItems.checklistItems.some((item) => hasValidContent(item.content));
+      noteWithItems.checklistItems.some((item: { content: string }) => hasValidContent(item.content));
 
+    // Send Slack notification
     if (
       user.organization?.slackWebhookUrl &&
       hasContent &&
@@ -195,6 +234,23 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         await db.note.update({
           where: { id: note.id },
           data: { slackMessageId: messageId },
+        });
+      }
+    }
+
+    // Send Discord notification
+    if (
+      user.organization?.discordWebhookUrl &&
+      hasContent &&
+      shouldSendDiscordNotification(session.user.id, boardId, board.name, board.sendDiscordUpdates)
+    ) {
+      const discordMessage = formatNoteForDiscord(noteWithItems, board.name, user.name || user.email);
+      const messageId = await sendDiscordMessage(user.organization.discordWebhookUrl, discordMessage);
+
+      if (messageId) {
+        await db.note.update({
+          where: { id: note.id },
+          data: { discordMessageId: messageId },
         });
       }
     }

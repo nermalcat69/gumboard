@@ -12,6 +12,8 @@ import { BetaBadge } from "@/components/ui/beta-badge";
 import { FullPageLoader } from "@/components/ui/loader";
 import { FilterPopover } from "@/components/ui/filter-popover";
 import { Note as NoteCard } from "@/components/note";
+import { useInfiniteNotes } from "@/hooks/useInfiniteNotes";
+import { InfiniteScroll } from "@/components/infinite-scroll";
 
 import {
   AlertDialog,
@@ -42,6 +44,10 @@ export default function BoardPage({ params }: { params: Promise<{ id: string }> 
   const [newBoardName, setNewBoardName] = useState("");
   const [newBoardDescription, setNewBoardDescription] = useState("");
   const [boardId, setBoardId] = useState<string | null>(null);
+  
+  // Use infinite scroll for regular boards (not all-notes or archive)
+  const shouldUseInfiniteScroll = boardId && boardId !== 'all-notes' && boardId !== 'archive';
+  const infiniteNotes = useInfiniteNotes(boardId || '', 20);
   const [isMobile, setIsMobile] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState("");
@@ -67,6 +73,7 @@ export default function BoardPage({ params }: { params: Promise<{ id: string }> 
     description: "",
     isPublic: false,
     sendSlackUpdates: true,
+    sendDiscordUpdates: true,
   });
   const [copiedPublicUrl, setCopiedPublicUrl] = useState(false);
   const [deleteConfirmDialog, setDeleteConfirmDialog] = useState(false);
@@ -518,9 +525,10 @@ export default function BoardPage({ params }: { params: Promise<{ id: string }> 
   const uniqueAuthors = useMemo(() => getUniqueAuthors(notes), [notes]);
 
   // Get filtered and sorted notes for display
+  const currentNotes = shouldUseInfiniteScroll ? infiniteNotes.notes : notes;
   const filteredNotes = useMemo(
-    () => filterAndSortNotes(notes, debouncedSearchTerm, dateRange, selectedAuthor, user),
-    [notes, debouncedSearchTerm, dateRange, selectedAuthor, user]
+    () => filterAndSortNotes(currentNotes, debouncedSearchTerm, dateRange, selectedAuthor, user),
+    [currentNotes, debouncedSearchTerm, dateRange, selectedAuthor, user]
   );
   const layoutNotes = useMemo(
     () => (isMobile ? calculateMobileLayout() : calculateGridLayout()),
@@ -601,6 +609,7 @@ export default function BoardPage({ params }: { params: Promise<{ id: string }> 
           description: board.description || "",
           isPublic: (board as { isPublic?: boolean })?.isPublic ?? false,
           sendSlackUpdates: (board as { sendSlackUpdates?: boolean })?.sendSlackUpdates ?? true,
+          sendDiscordUpdates: (board as { sendDiscordUpdates?: boolean })?.sendDiscordUpdates ?? true,
         });
       }
 
@@ -664,7 +673,11 @@ export default function BoardPage({ params }: { params: Promise<{ id: string }> 
 
       if (response.ok) {
         const { note } = await response.json();
-        setNotes([...notes, note]);
+        if (shouldUseInfiniteScroll) {
+          infiniteNotes.addNote(note);
+        } else {
+          setNotes([...notes, note]);
+        }
         setAddingChecklistItem(note.id);
       }
     } catch (error) {
@@ -828,6 +841,7 @@ export default function BoardPage({ params }: { params: Promise<{ id: string }> 
     description?: string;
     isPublic?: boolean;
     sendSlackUpdates: boolean;
+    sendDiscordUpdates: boolean;
   }) => {
     try {
       const response = await fetch(`/api/boards/${boardId}`, {
@@ -844,6 +858,7 @@ export default function BoardPage({ params }: { params: Promise<{ id: string }> 
           description: board.description || "",
           isPublic: (board as { isPublic?: boolean })?.isPublic ?? false,
           sendSlackUpdates: (board as { sendSlackUpdates?: boolean })?.sendSlackUpdates ?? true,
+          sendDiscordUpdates: (board as { sendDiscordUpdates?: boolean })?.sendDiscordUpdates ?? true,
         });
         setBoardSettingsDialog(false);
       }
@@ -1011,6 +1026,8 @@ export default function BoardPage({ params }: { params: Promise<{ id: string }> 
                             isPublic: (board as { isPublic?: boolean })?.isPublic ?? false,
                             sendSlackUpdates:
                               (board as { sendSlackUpdates?: boolean })?.sendSlackUpdates ?? true,
+                            sendDiscordUpdates:
+                              (board as { sendDiscordUpdates?: boolean })?.sendDiscordUpdates ?? true,
                           });
                           setBoardSettingsDialog(true);
                           setShowBoardDropdown(false);
@@ -1109,29 +1126,61 @@ export default function BoardPage({ params }: { params: Promise<{ id: string }> 
       >
         {/* Notes */}
         <div className="relative w-full h-full">
-          {layoutNotes.map((note) => (
-            <NoteCard
-              key={note.id}
-              note={note as Note}
-              currentUser={user as User}
-              addingChecklistItem={addingChecklistItem}
-              onUpdate={handleUpdateNoteFromComponent}
-              onDelete={handleDeleteNote}
-              onArchive={boardId !== "archive" ? handleArchiveNote : undefined}
-              onUnarchive={boardId === "archive" ? handleUnarchiveNote : undefined}
-              showBoardName={boardId === "all-notes" || boardId === "archive"}
-              className="note-background"
-              style={{
-                position: "absolute",
-                left: note.x,
-                top: note.y,
-                width: note.width,
-                height: note.height,
-                padding: `${getResponsiveConfig().notePadding}px`,
-                backgroundColor: resolvedTheme === "dark" ? "#18181B" : note.color,
-              }}
-            />
-          ))}
+          {shouldUseInfiniteScroll ? (
+            <InfiniteScroll
+              hasMore={infiniteNotes.hasMore}
+              loading={infiniteNotes.loading}
+              onLoadMore={infiniteNotes.loadMore}
+            >
+              {layoutNotes.map((note) => (
+                <NoteCard
+                  key={note.id}
+                  note={note as Note}
+                  currentUser={user as User}
+                  addingChecklistItem={addingChecklistItem}
+                  onUpdate={handleUpdateNoteFromComponent}
+                  onDelete={shouldUseInfiniteScroll ? infiniteNotes.removeNote : handleDeleteNote}
+                  onArchive={boardId !== "archive" ? handleArchiveNote : undefined}
+                  onUnarchive={boardId === "archive" ? handleUnarchiveNote : undefined}
+                  showBoardName={boardId === "all-notes" || boardId === "archive"}
+                  className="note-background"
+                  style={{
+                    position: "absolute",
+                    left: note.x,
+                    top: note.y,
+                    width: note.width,
+                    height: note.height,
+                    padding: `${getResponsiveConfig().notePadding}px`,
+                    backgroundColor: resolvedTheme === "dark" ? "#18181B" : note.color,
+                  }}
+                />
+              ))}
+            </InfiniteScroll>
+          ) : (
+            layoutNotes.map((note) => (
+              <NoteCard
+                key={note.id}
+                note={note as Note}
+                currentUser={user as User}
+                addingChecklistItem={addingChecklistItem}
+                onUpdate={handleUpdateNoteFromComponent}
+                onDelete={handleDeleteNote}
+                onArchive={boardId !== "archive" ? handleArchiveNote : undefined}
+                onUnarchive={boardId === "archive" ? handleUnarchiveNote : undefined}
+                showBoardName={boardId === "all-notes" || boardId === "archive"}
+                className="note-background"
+                style={{
+                  position: "absolute",
+                  left: note.x,
+                  top: note.y,
+                  width: note.width,
+                  height: note.height,
+                  padding: `${getResponsiveConfig().notePadding}px`,
+                  backgroundColor: resolvedTheme === "dark" ? "#18181B" : note.color,
+                }}
+              />
+            ))
+          )}
         </div>
 
         {/* Empty State */}
@@ -1378,6 +1427,25 @@ export default function BoardPage({ params }: { params: Promise<{ id: string }> 
             </div>
             <p className="text-xs text-muted-foreground dark:text-zinc-400 mt-1 ml-6">
               When enabled, note updates will be sent to your organization&apos;s Slack channel
+            </p>
+
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="sendDiscordUpdates"
+                checked={boardSettings.sendDiscordUpdates}
+                onCheckedChange={(checked) =>
+                  setBoardSettings((prev) => ({ ...prev, sendDiscordUpdates: checked as boolean }))
+                }
+              />
+              <label
+                htmlFor="sendDiscordUpdates"
+                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-foreground dark:text-zinc-100"
+              >
+                Send updates to Discord
+              </label>
+            </div>
+            <p className="text-xs text-muted-foreground dark:text-zinc-400 mt-1 ml-6">
+              When enabled, note updates will be sent to your organization&apos;s Discord channel
             </p>
           </div>
 

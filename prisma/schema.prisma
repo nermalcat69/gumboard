@@ -71,6 +71,7 @@ model Organization {
   id        String   @id @default(cuid())
   name      String
   slackWebhookUrl String?
+  discordWebhookUrl String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   members   User[]
@@ -87,6 +88,7 @@ model Board {
   description    String?
   isPublic       Boolean      @default(false)
   sendSlackUpdates Boolean    @default(true)
+  sendDiscordUpdates Boolean  @default(true)
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   createdBy      String
@@ -105,6 +107,7 @@ model Note {
   checklistItems ChecklistItem[]
   archivedAt     DateTime? // Track archived status
   slackMessageId String?
+  discordMessageId String?
   boardId   String
   board     Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
   createdBy String
@@ -127,6 +130,7 @@ model ChecklistItem {
   order          Int      @default(0)
   noteId         String
   slackMessageId String?
+  discordMessageId String?
   note           Note     @relation(fields: [noteId], references: [id], onDelete: Cascade)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
